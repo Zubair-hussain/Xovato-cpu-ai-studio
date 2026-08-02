@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+data/
+models/**/*.pth
+models/**/*.onnx
+models/**/*.ckpt
+models/**/*.safetensors
+models/backend-data-models/
+models/**/k2-fsa_OmniVoice/

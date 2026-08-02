@@ -1,0 +1,65 @@
+{
+  "deployment_mode": "cpu-only",
+  "expected_model_root": "deployment/models",
+  "runtime_notes": [
+    "No CUDA or GPU runtime is required.",
+    "Large models are optional and should be copied only when the host has enough CPU/RAM/disk.",
+    "ENHANCEAI_USE_REAL_OMNIVOICE defaults to false for CPU-friendly deployment."
+  ],
+  "models": [
+    {
+      "id": "u2netp",
+      "feature": "background-removal",
+      "expected_path": "models/segmentation/u2netp.onnx",
+      "source_path": "../backend/data/models/segmentation/u2netp.onnx",
+      "cpu_friendly": true,
+      "required": false,
+      "status": "present_locally"
+    },
+    {
+      "id": "yunet",
+      "feature": "face-detection",
+      "expected_path": "models/face/yunet.onnx",
+      "source_path": "../backend/data/models/face/yunet.onnx",
+      "cpu_friendly": true,
+      "required": false,
+      "status": "present_locally"
+    },
+    {
+      "id": "gpen_bfr_256",
+      "feature": "face-restoration",
+      "expected_path": "models/face/gpen_bfr_256.onnx",
+      "source_path": "../backend/data/models/face/gpen_bfr_256.onnx",
+      "cpu_friendly": "moderate",
+      "required": false,
+      "status": "present_locally"
+    },
+    {
+      "id": "k2-fsa_OmniVoice",
+      "feature": "text-to-speech",
+      "expected_path": "models/omnivoice/k2-fsa_OmniVoice",
+      "source_path": "../backend/data/models/k2-fsa_OmniVoice",
+      "cpu_friendly": "heavy",
+      "required": false,
+      "status": "present_locally_but_optional_for_cpu_deploy"
+    },
+    {
+      "id": "whisper-cpu",
+      "feature": "transcription-and-subtitles",
+      "expected_path": "models/whisper-cpu",
+      "source_path": null,
+      "cpu_friendly": "small_or_base_models_only",
+      "required": false,
+      "status": "not_added_yet"
+    },
+    {
+      "id": "audio-cpu",
+      "feature": "audio-enhancement",
+      "expected_path": "models/audio-cpu",
+      "source_path": null,
+      "cpu_friendly": true,
+      "required": false,
+      "status": "code_based_processing_currently"
+    }
+  ]
+}

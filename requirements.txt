@@ -1,0 +1,12 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+pydantic-settings==2.10.1
+python-multipart==0.0.20
+pillow==12.3.0
+numpy==2.5.1
+onnxruntime==1.28.0
+soundfile==0.14.0
+pytest==8.4.1
+httpx==0.28.1
+static-ffmpeg==3.0
+faster-whisper==1.2.1
