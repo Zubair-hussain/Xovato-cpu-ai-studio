@@ -1,0 +1,25 @@
+<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Benchmarks - Xovato</title><style>
+:root{--ink:#1b2030;--muted:#6b7280;--line:#e6e8ee;--bg:#f7f8fa;--card:#fff;
+--brand:#4f46e5;--good:#10b981;--warn:#f59e0b;--bad:#ef4444}
+*{box-sizing:border-box}body{margin:0;font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;
+color:var(--ink);background:var(--bg)}
+.wrap{max-width:1000px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:30px;margin:0 0 4px}h2{font-size:20px;margin:32px 0 12px}
+.sub{color:var(--muted);margin:0 0 24px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:20px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+.card .n{font-size:30px;font-weight:700}.card .l{color:var(--muted);font-size:13px}
+a.tile{display:block;background:var(--card);border:1px solid var(--line);border-radius:12px;
+padding:18px;text-decoration:none;color:inherit}a.tile:hover{border-color:var(--brand)}
+a.tile .t{font-weight:600}a.tile .d{color:var(--muted);font-size:13px;margin-top:4px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
+border-radius:12px;overflow:hidden}th,td{padding:10px 14px;text-align:left;border-bottom:1px solid var(--line)}
+th{background:#fbfbfd;font-size:13px;color:var(--muted)}tr:last-child td{border-bottom:0}
+.bar{height:8px;border-radius:4px;background:#eef0f4;overflow:hidden;min-width:120px}
+.bar>span{display:block;height:100%}
+.pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600}
+.ok{background:#e7f8f0;color:#0a7f52}.mid{background:#fef3e2;color:#a15c00}.lo{background:#fdeaea;color:#b42318}
+img{max-width:100%;border:1px solid var(--line);border-radius:10px;margin:8px 0}
+code{background:#eef0f4;padding:1px 6px;border-radius:5px;font-size:13px}
+footer{margin-top:48px;color:var(--muted);font-size:13px;border-top:1px solid var(--line);padding-top:16px}
+</style></head><body><div class=wrap><h1>Benchmarks</h1><p class=sub>Measured on CPU &middot; Windows-10-10.0.19045-SP0 &middot; Python 3.12.14</p><img src='../assets/bench_image_enhance.png' alt='image enhance'><h2>Image enhancement</h2><table><tr><th>Input</th><th>Time</th></tr><tr><td>1MP (1154x866)</td><td>0.51 s</td></tr><tr><td>3MP (2000x1500)</td><td>1.585 s</td></tr><tr><td>8MP (3265x2449)</td><td>3.877 s</td></tr></table><img src='../assets/bench_audio_enhance.png' alt='audio enhance'><h2>Audio enhancement</h2><table><tr><th>Input</th><th>Time</th></tr><tr><td>10s stereo 48k</td><td>2.003 s</td></tr><tr><td>60s stereo 48k</td><td>12.39 s</td></tr><tr><td>300s stereo 48k</td><td>66.016 s</td></tr></table><h2>Text-to-speech preview</h2><table><tr><th>Input</th><th>Time</th></tr><tr><td>short (12 words)</td><td>0.89 s</td></tr><tr><td>medium (40 words)</td><td>0.807 s</td></tr></table><h2>vs hosted services</h2><img src='../assets/compare_bg_removal.png' alt='comparison'><p class=sub>Xovato bars are measured; competitor bars are typical published ranges (cloud GPU), shown for positioning only. Full detail in <a href='../benchmarks.md'>benchmarks.md</a>.</p><footer>Generated 2026-09-13 13:24 UTC &middot; Xovato AI Studio &middot; &copy; Zubair Hussain</footer></div></body></html>
