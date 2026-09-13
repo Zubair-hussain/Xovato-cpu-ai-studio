@@ -3,6 +3,15 @@ __pycache__/
 .env
 .venv/
 data/
+# Test & coverage artifacts
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+# Licensing: never commit private keys. Commit only root_public.pem if desired.
+keys/
+*.pem
+!root_public.pem
 models/**/*.pth
 models/**/*.onnx
 models/**/*.ckpt
