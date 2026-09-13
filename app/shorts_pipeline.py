@@ -133,7 +133,9 @@ def _local_whisper(audio_path: Path, model_size: str) -> Transcript:
     if not segments:
         raise ShortsPipelineError("No speech was found in this media.")
 
-    return Transcript(engine=f"faster-whisper-{model_size}", language=info.language or "en", segments=segments, words=words)
+    return Transcript(
+        engine=f"faster-whisper-{model_size}", language=info.language or "en", segments=segments, words=words
+    )
 
 
 def _deepgram(audio_path: Path, api_key: str) -> Transcript:
@@ -308,13 +310,7 @@ def rank_heuristic(
             filler = len(_FILLER.findall(text)) / max(word_count, 1)
             filler_penalty = max(0.0, 1.0 - filler * 6.0)
 
-            score = (
-                hook_score * 0.34
-                + pace_score * 0.20
-                + closure * 0.16
-                + fit * 0.16
-                + filler_penalty * 0.14
-            )
+            score = hook_score * 0.34 + pace_score * 0.20 + closure * 0.16 + fit * 0.16 + filler_penalty * 0.14
 
             if best is not None and score <= best.score:
                 continue
@@ -352,8 +348,7 @@ def _suppress_overlaps(candidates: list[Candidate], target_count: int) -> list[C
         if len(kept) >= target_count:
             break
         overlaps = any(
-            candidate.start_sec < existing.end_sec and existing.start_sec < candidate.end_sec
-            for existing in kept
+            candidate.start_sec < existing.end_sec and existing.start_sec < candidate.end_sec for existing in kept
         )
         if not overlaps:
             kept.append(candidate)
@@ -388,16 +383,15 @@ def rank_with_llm(
     target_count: int,
     min_len: float,
     max_len: float,
+    provider: str | None = None,
 ) -> list[Candidate]:
     """Rank via any OpenAI-compatible chat API, or Anthropic."""
     import httpx
 
-    provider = (os.getenv("SHORTS_LLM_PROVIDER") or "deepseek").strip().lower()
+    provider = (provider or os.getenv("SHORTS_LLM_PROVIDER") or "deepseek").strip().lower()
     lines = "\n".join(f"[{s.start:.1f}-{s.end:.1f}] {s.text}" for s in transcript.segments)
     # Keep the request bounded; very long transcripts get truncated.
-    prompt = _LLM_PROMPT.format(
-        min_len=min_len, max_len=max_len, count=target_count, transcript=lines[:60000]
-    )
+    prompt = _LLM_PROMPT.format(min_len=min_len, max_len=max_len, count=target_count, transcript=lines[:60000])
 
     if provider == "anthropic":
         key = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -492,10 +486,21 @@ def rank_moments(
     chosen = (provider or os.getenv("SHORTS_RANKING_PROVIDER") or "heuristic").strip().lower()
 
     if chosen in {"llm", "deepseek", "openai", "anthropic", "openrouter", "groq"}:
-        if chosen != "llm":
-            os.environ.setdefault("SHORTS_LLM_PROVIDER", chosen)
+        # Pass the provider through explicitly. The old code called
+        # os.environ.setdefault(), so the first request's provider stuck for the
+        # life of the process and later requests silently ignored their choice.
+        llm_provider = None if chosen == "llm" else chosen
         try:
-            return rank_with_llm(transcript, target_count=target_count, min_len=min_len, max_len=max_len), "llm"
+            return (
+                rank_with_llm(
+                    transcript,
+                    target_count=target_count,
+                    min_len=min_len,
+                    max_len=max_len,
+                    provider=llm_provider,
+                ),
+                "llm",
+            )
         except ShortsPipelineError as error:
             # A missing key or a flaky API should degrade, not fail the whole job.
             logger.warning(
