@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 SettingValue = str | int | float | bool | list[str]
 
@@ -60,7 +60,10 @@ class VoiceProfileCreate(BaseModel):
     name: str = Field(..., examples=["Creator voice profile"])
     language: str = Field(default="en")
     reference_uri: str = Field(..., examples=["local://uploads/reference.wav"])
-    consent_verified: bool = True
+    # Cloning someone's voice requires their explicit consent. This defaults to
+    # False so a client that omits the field cannot silently record a clone as
+    # consented; the API rejects clone creation unless it is set to True.
+    consent_verified: bool = False
     tags: list[str] = Field(default_factory=list)
     # The real transcript of the reference clip. A wrong transcript measurably
     # degrades clone quality; leaving it empty lets OmniVoice auto-transcribe.
@@ -77,6 +80,9 @@ class VoiceProfile(BaseModel):
     reference_text: str | None = None
     engine: str = "omnivoice-local"
     portable_bundle_uri: str | None = None
+    # For voice-design profiles: the instruct items derived from the requested
+    # gender/age/accent/pitch, used as the base attributes at synthesis time.
+    design_instruct: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -152,13 +158,19 @@ class StoryRequest(BaseModel):
 
 
 class ShortsClip(BaseModel):
-    start_sec: float
-    end_sec: float
+    start_sec: float = Field(..., ge=0.0)
+    end_sec: float = Field(..., gt=0.0)
     hook: str = ""
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "ShortsClip":
+        if self.end_sec <= self.start_sec:
+            raise ValueError("end_sec must be greater than start_sec.")
+        return self
 
 
 class ShortsRenderRequest(BaseModel):
-    clips: list[ShortsClip]
+    clips: list[ShortsClip] = Field(..., min_length=1, max_length=20)
     captions: bool = True
 
 

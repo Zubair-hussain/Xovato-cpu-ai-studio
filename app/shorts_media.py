@@ -52,8 +52,7 @@ def ensure_ffmpeg() -> None:
             static_ffmpeg.add_paths()
         except Exception as error:
             raise ShortsMediaError(
-                "ffmpeg is unavailable. Install the static-ffmpeg package or put "
-                "ffmpeg and ffprobe on PATH."
+                "ffmpeg is unavailable. Install the static-ffmpeg package or put " "ffmpeg and ffprobe on PATH."
             ) from error
 
         if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
@@ -107,8 +106,14 @@ def probe_media(path: Path) -> MediaProbe:
     ensure_ffmpeg()
     completed = _run(
         [
-            "ffprobe", "-v", "error", "-print_format", "json",
-            "-show_format", "-show_streams", str(path),
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            str(path),
         ],
         what="ffprobe",
         timeout=120,
@@ -166,12 +171,20 @@ def _escape_drawtext(text: str) -> str:
     )
 
 
-def build_caption_filter(words: list[dict], start_sec: float, end_sec: float) -> str:
-    """Burn-in captions as a chain of time-gated drawtext filters.
+def _group_caption_phrases(
+    words: list[dict], start_sec: float, end_sec: float, *, max_words: int = 4, max_gap: float = 0.7
+) -> list[tuple[float, float, str]]:
+    """Group word timings into short phrases rebased to the clip start.
 
-    Times are rebased to the clip, because the clip starts at 0 once cut.
+    One drawtext filter per word produced ~150 filters on a 60s clip, which is
+    slow to encode and can blow past the OS command-line length limit. Grouping
+    into a few-word phrases keeps captions readable with far fewer filters.
     """
-    parts: list[str] = []
+    phrases: list[tuple[float, float, str]] = []
+    bucket: list[str] = []
+    bucket_start: float | None = None
+    bucket_end: float | None = None
+
     for word in words:
         w_start = float(word.get("start", 0.0))
         w_end = float(word.get("end", 0.0))
@@ -179,13 +192,31 @@ def build_caption_filter(words: list[dict], start_sec: float, end_sec: float) ->
         if not text or w_end <= start_sec or w_start >= end_sec:
             continue
 
-        local_start = max(0.0, w_start - start_sec)
-        local_end = max(local_start + 0.05, w_end - start_sec)
+        gap = bucket_end is not None and (w_start - bucket_end) > max_gap
+        if bucket and (len(bucket) >= max_words or gap):
+            phrases.append((bucket_start, bucket_end, " ".join(bucket)))
+            bucket, bucket_start, bucket_end = [], None, None
+
+        if bucket_start is None:
+            bucket_start = max(0.0, w_start - start_sec)
+        bucket_end = max((bucket_start or 0.0) + 0.05, w_end - start_sec)
+        bucket.append(text)
+
+    if bucket:
+        phrases.append((bucket_start, bucket_end, " ".join(bucket)))
+    return phrases
+
+
+def build_caption_filter(words: list[dict], start_sec: float, end_sec: float) -> str:
+    """Burn-in captions as time-gated drawtext filters, one per short phrase.
+
+    Times are rebased to the clip, because the clip starts at 0 once cut.
+    """
+    parts: list[str] = []
+    for phrase_start, phrase_end, text in _group_caption_phrases(words, start_sec, end_sec):
         parts.append(
-            "drawtext=text='{text}':fontcolor=white:fontsize=h/18:borderw=4:bordercolor=black@0.85"
-            ":x=(w-text_w)/2:y=h*0.72:enable='between(t,{s:.2f},{e:.2f})'".format(
-                text=_escape_drawtext(text.upper()), s=local_start, e=local_end
-            )
+            f"drawtext=text='{_escape_drawtext(text.upper())}':fontcolor=white:fontsize=h/18:borderw=4:bordercolor=black@0.85"
+            f":x=(w-text_w)/2:y=h*0.72:enable='between(t,{phrase_start:.2f},{phrase_end:.2f})'"
         )
 
     return ",".join(parts)
@@ -199,21 +230,25 @@ def render_clip(
     *,
     caption_filter: str | None = None,
     portrait: bool = True,
+    probe: MediaProbe | None = None,
 ) -> Path:
-    """Cut a segment and centre-crop it to 9:16 portrait H.264."""
+    """Cut a segment and centre-crop it to 9:16 portrait H.264.
+
+    ``probe`` may be supplied by the caller so a multi-clip render probes the
+    source once instead of re-running ffprobe for every clip.
+    """
     ensure_ffmpeg()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    probe = probe_media(source)
+    if probe is None:
+        probe = probe_media(source)
     command = ["ffmpeg", "-y", "-ss", f"{start_sec:.3f}", "-to", f"{end_sec:.3f}", "-i", str(source)]
 
     if probe.has_video:
         filters: list[str] = []
         if portrait:
             # Even dimensions are required by yuv420p, hence the 2*trunc(...).
-            filters.append(
-                "crop=w='2*trunc(min(iw,ih*9/16)/2)':h='2*trunc(min(ih,iw*16/9)/2)'"
-            )
+            filters.append("crop=w='2*trunc(min(iw,ih*9/16)/2)':h='2*trunc(min(ih,iw*16/9)/2)'")
         if caption_filter:
             filters.append(caption_filter)
 

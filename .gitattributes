@@ -1,0 +1,15 @@
+# Normalise line endings across platforms.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.wav binary
+*.onnx binary
+*.safetensors binary
+
+*.ps1 text eol=crlf
+Makefile text eol=lf
+
+# Keep the notebook diff-friendly-ish and collapsed in language stats.
+*.ipynb linguist-language=Jupyter\ Notebook

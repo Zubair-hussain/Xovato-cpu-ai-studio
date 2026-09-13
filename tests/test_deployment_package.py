@@ -1,6 +1,5 @@
-from pathlib import Path
 import importlib
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,4 +43,3 @@ def test_model_manager_imports() -> None:
         "face-restoration",
         "text-to-speech",
     }
-

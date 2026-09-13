@@ -1,0 +1,33 @@
+name: License Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  licensing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install security deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-security.txt pytest
+
+      - name: Run licensing tests
+        run: pytest tests/test_licensing.py -p no:cacheprovider -o addopts=""
+
+      - name: Verify committed license (if present)
+        run: |
+          if [ -f license.json ] && [ -f root_public.pem ]; then
+            python -m scripts.licensing.license_tool verify \
+              --license license.json --root-pub root_public.pem --machine '*'
+          else
+            echo "No committed license.json / root_public.pem - skipping verify."
+          fi

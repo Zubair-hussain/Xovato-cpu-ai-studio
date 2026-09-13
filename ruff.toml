@@ -1,0 +1,19 @@
+# Ruff configuration - lint + format for the Xovato backend.
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    "E501",  # line length is handled by the formatter, not the linter
+    "B008",  # FastAPI uses function calls (File(...), Form(...)) in defaults by design
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["B011"]
+# Benchmark scripts adjust sys.path before importing the app (E402) and use
+# immediately-invoked lambdas inside loops (B023), which is safe here.
+"scripts/*" = ["E402", "B023"]
+
+[lint.isort]
+known-first-party = ["app"]

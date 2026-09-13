@@ -1,0 +1,21 @@
+{
+  "machine": {
+    "python": "3.12.14",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 9, GenuineIntel"
+  },
+  "image_enhance": {
+    "1MP (1154x866)": 0.51,
+    "3MP (2000x1500)": 1.585,
+    "8MP (3265x2449)": 3.877
+  },
+  "audio_enhance": {
+    "10s stereo 48k": 2.003,
+    "60s stereo 48k": 12.39,
+    "300s stereo 48k": 66.016
+  },
+  "tts_preview": {
+    "short (12 words)": 0.89,
+    "medium (40 words)": 0.807
+  }
+}

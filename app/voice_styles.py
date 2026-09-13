@@ -28,13 +28,29 @@ import numpy as np
 
 # Exactly the items OmniVoice._resolve_instruct accepts. Anything else raises.
 VALID_INSTRUCT_ITEMS = (
-    "male", "female",
-    "child", "teenager", "young adult", "middle-aged", "elderly",
-    "very low pitch", "low pitch", "moderate pitch", "high pitch", "very high pitch",
+    "male",
+    "female",
+    "child",
+    "teenager",
+    "young adult",
+    "middle-aged",
+    "elderly",
+    "very low pitch",
+    "low pitch",
+    "moderate pitch",
+    "high pitch",
+    "very high pitch",
     "whisper",
-    "american accent", "australian accent", "british accent", "canadian accent",
-    "chinese accent", "indian accent", "japanese accent", "korean accent",
-    "portuguese accent", "russian accent",
+    "american accent",
+    "australian accent",
+    "british accent",
+    "canadian accent",
+    "chinese accent",
+    "indian accent",
+    "japanese accent",
+    "korean accent",
+    "portuguese accent",
+    "russian accent",
 )
 
 # Categories that cannot be combined with each other.
@@ -150,17 +166,14 @@ def validate_instruct_items(items: list[str]) -> list[str]:
             continue
         if item not in VALID_INSTRUCT_ITEMS:
             raise VoiceStyleError(
-                f"'{raw}' is not a supported voice attribute. "
-                f"Supported: {', '.join(VALID_INSTRUCT_ITEMS)}."
+                f"'{raw}' is not a supported voice attribute. " f"Supported: {', '.join(VALID_INSTRUCT_ITEMS)}."
             )
         normalised.append(item)
 
     for group in _EXCLUSIVE_GROUPS:
         hits = [item for item in normalised if item in group]
         if len(hits) > 1:
-            raise VoiceStyleError(
-                f"Conflicting attributes in the same category: {', '.join(hits)}. Pick one."
-            )
+            raise VoiceStyleError(f"Conflicting attributes in the same category: {', '.join(hits)}. Pick one.")
 
     return normalised
 
@@ -188,9 +201,7 @@ def resolve_style(
     key = (emotion or "neutral").strip().lower()
     preset = EMOTION_PRESETS.get(key)
     if preset is None:
-        raise VoiceStyleError(
-            f"Unknown emotion '{emotion}'. Available: {', '.join(sorted(EMOTION_PRESETS))}."
-        )
+        raise VoiceStyleError(f"Unknown emotion '{emotion}'. Available: {', '.join(sorted(EMOTION_PRESETS))}.")
 
     items: list[str] = []
     for layer in (base_instruct or [], preset.instruct_items, extra_instruct or []):
@@ -227,6 +238,63 @@ def resolve_style(
 def instruct_string(style: VoiceStyle) -> str | None:
     """Render the instruct list the way OmniVoice expects it."""
     return ", ".join(style.instruct_items) if style.instruct_items else None
+
+
+# Map free-form voice-design fields onto the small fixed instruct vocabulary the
+# model actually understands.
+_GENDER_MAP = {"male": "male", "female": "female", "m": "male", "f": "female"}
+_AGE_MAP = {
+    "child": "child",
+    "kid": "child",
+    "teen": "teenager",
+    "teenager": "teenager",
+    "young": "young adult",
+    "young adult": "young adult",
+    "adult": "middle-aged",
+    "middle-aged": "middle-aged",
+    "middle aged": "middle-aged",
+    "senior": "elderly",
+    "elderly": "elderly",
+    "old": "elderly",
+}
+_ACCENT_MAP = {accent.split(" ")[0]: accent for accent in VALID_INSTRUCT_ITEMS if accent.endswith(" accent")}
+
+
+def design_to_instruct(*, gender: str, age: str, accent: str, pitch: float) -> list[str]:
+    """Translate a :class:`VoiceDesignRequest`'s attributes into instruct items.
+
+    Unknown values are dropped rather than raising, so a design never fails to
+    synthesise - it just applies the attributes the model can honour. ``pitch``
+    is bucketed onto the model's five pitch levels.
+    """
+    items: list[str] = []
+
+    mapped_gender = _GENDER_MAP.get((gender or "").strip().lower())
+    if mapped_gender:
+        items.append(mapped_gender)
+
+    mapped_age = _AGE_MAP.get((age or "").strip().lower())
+    if mapped_age:
+        items.append(mapped_age)
+
+    mapped_accent = _ACCENT_MAP.get((accent or "").strip().lower())
+    if mapped_accent:
+        items.append(mapped_accent)
+
+    if pitch and abs(pitch - 1.0) > 0.03:
+        if pitch <= 0.8:
+            items.append("very low pitch")
+        elif pitch < 0.95:
+            items.append("low pitch")
+        elif pitch <= 1.15:
+            items.append("moderate pitch")
+        elif pitch < 1.35:
+            items.append("high pitch")
+        else:
+            items.append("very high pitch")
+
+    # validate_instruct_items also enforces the "one per category" rule.
+    return validate_instruct_items(items)
 
 
 # --------------------------------------------------------------------------- #

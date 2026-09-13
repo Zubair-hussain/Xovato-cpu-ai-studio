@@ -14,14 +14,19 @@ for running more than one replica.
 from __future__ import annotations
 
 import logging
-import shutil
 from dataclasses import asdict
 from pathlib import Path
 
 from app.config import Settings
 from app.models import JobCreate, MediaType
 from app.services import job_store
-from app.shorts_media import ShortsMediaError, build_caption_filter, extract_audio, probe_media, render_clip
+from app.shorts_media import (
+    ShortsMediaError,
+    build_caption_filter,
+    extract_audio,
+    probe_media,
+    render_clip,
+)
 from app.shorts_pipeline import (
     ShortsPipelineError,
     Transcript,
@@ -40,14 +45,35 @@ def project_dir(settings: Settings, project_id: str) -> Path:
     return settings.data_dir / "shorts" / project_id
 
 
-def save_upload(settings: Settings, project_id: str, filename: str, source) -> Path:
+class UploadTooLarge(RuntimeError):
+    """Raised when a streamed upload exceeds the configured byte limit."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        self.limit_bytes = limit_bytes
+        super().__init__(f"Upload exceeds the {limit_bytes} byte limit.")
+
+
+def save_upload(settings: Settings, project_id: str, filename: str, source, *, max_bytes: int | None = None) -> Path:
     directory = project_dir(settings, project_id)
     directory.mkdir(parents=True, exist_ok=True)
 
     suffix = Path(filename or "source.mp4").suffix.lower() or ".mp4"
     destination = directory / f"source{suffix}"
+
+    # Stream in chunks and stop the moment the limit is passed, so a huge upload
+    # cannot fill the disk before a post-hoc size check runs.
+    written = 0
     with destination.open("wb") as handle:
-        shutil.copyfileobj(source, handle)
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            written += len(chunk)
+            if max_bytes is not None and written > max_bytes:
+                handle.close()
+                destination.unlink(missing_ok=True)
+                raise UploadTooLarge(max_bytes)
+            handle.write(chunk)
     return destination
 
 
@@ -104,9 +130,7 @@ def run_analysis(
         )
 
         if not candidates:
-            raise ShortsPipelineError(
-                "No moments long enough were found. Try lowering the minimum clip length."
-            )
+            raise ShortsPipelineError("No moments long enough were found. Try lowering the minimum clip length.")
 
         job_store.set_result(
             job_id,
@@ -154,6 +178,9 @@ def run_render(
     rendered: list[dict] = []
 
     try:
+        # Probe the source once and reuse it for every clip instead of running
+        # ffprobe per clip inside render_clip.
+        source_probe = probe_media(source)
         for index, clip in enumerate(clips):
             start = float(clip["start_sec"])
             end = float(clip["end_sec"])
@@ -162,12 +189,10 @@ def run_render(
 
             caption_filter = None
             if captions and transcript and transcript.words:
-                caption_filter = build_caption_filter(
-                    [asdict(word) for word in transcript.words], start, end
-                ) or None
+                caption_filter = build_caption_filter([asdict(word) for word in transcript.words], start, end) or None
 
             output = directory / f"clip_{index + 1:02d}.mp4"
-            render_clip(source, start, end, output, caption_filter=caption_filter)
+            render_clip(source, start, end, output, caption_filter=caption_filter, probe=source_probe)
 
             rendered.append(
                 {

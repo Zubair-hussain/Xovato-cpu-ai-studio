@@ -1,0 +1,35 @@
+# Optional NVIDIA CUDA / GPU acceleration.
+#
+# The default deploy is CPU-only (see requirements.txt). Install this file ONLY
+# on a machine with an NVIDIA GPU and a matching CUDA toolkit/driver. It is not
+# needed for the CPU backend and is never imported unless the GPU code paths run.
+#
+#   pip install -r requirements.txt          # base runtime (always)
+#   pip install -r requirements-gpu.txt      # then add GPU acceleration
+#
+# torch is pulled from the CUDA 12.1 wheel index; change cu121 to match your
+# installed CUDA (cu118, cu124, ...). pip resolves the correct platform wheel -
+# do not vendor .whl files into the repo, they are large and platform-specific.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Deep-learning runtime (CUDA build). Required for real OmniVoice TTS on GPU.
+torch==2.5.1
+torchaudio==2.5.1
+
+# GPU ONNX Runtime for background removal / face restoration.
+# Must match the CPU onnxruntime version in requirements.txt; the two cannot
+# coexist, so uninstall onnxruntime first: pip uninstall -y onnxruntime
+onnxruntime-gpu==1.28.0
+
+# Low-level CUDA access (custom kernels, memory ops). Requires the CUDA toolkit
+# (nvcc) present at install time.
+pycuda==2024.1.2
+
+# NVIDIA CUDA Python bindings (driver/runtime API from Python).
+cuda-python==12.6.0
+
+# The real OmniVoice text-to-speech package (heavy; pulls transformers + audio).
+omnivoice==0.1.3
+
+# Faster large-file uploads/downloads from the Hugging Face hub.
+huggingface_hub[hf_transfer]==0.27.0

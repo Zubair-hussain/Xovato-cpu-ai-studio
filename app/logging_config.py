@@ -18,6 +18,37 @@ class HealthLogFilter(logging.Filter):
         }
 
 
+# Attributes present on every LogRecord; anything else attached via ``extra=``
+# is application context we want to keep in the JSON line.
+_STANDARD_RECORD_KEYS = frozenset(
+    {
+        "name",
+        "msg",
+        "args",
+        "levelname",
+        "levelno",
+        "pathname",
+        "filename",
+        "module",
+        "exc_info",
+        "exc_text",
+        "stack_info",
+        "lineno",
+        "funcName",
+        "created",
+        "msecs",
+        "relativeCreated",
+        "thread",
+        "threadName",
+        "processName",
+        "process",
+        "taskName",
+        "message",
+        "asctime",
+    }
+)
+
+
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -27,19 +58,18 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        for key in (
-            "module_name",
-            "action",
-            "job_id",
-            "media_type",
-            "cpu_percent",
-            "circuit_state",
-            "retry_after_seconds",
-            "warning",
-        ):
-            value = getattr(record, key, None)
-            if value is not None:
+        # Keep every extra field the caller attached (output_bytes,
+        # generate_seconds, realtime_factor, cloned, faces_detected, path, …),
+        # not just a fixed allowlist. Values must be JSON-serialisable; anything
+        # exotic is stringified so a stray object never drops the whole line.
+        for key, value in record.__dict__.items():
+            if key in _STANDARD_RECORD_KEYS or key.startswith("_") or value is None:
+                continue
+            try:
+                json.dumps(value)
                 payload[key] = value
+            except (TypeError, ValueError):
+                payload[key] = str(value)
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)

@@ -3,7 +3,6 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 BASE_DIR = Path(__file__).resolve().parents[1]
 MODEL_DIR = BASE_DIR / "models"
 
@@ -28,17 +27,35 @@ class Settings(BaseSettings):
     segmentation_model_path: Path = MODEL_DIR / "segmentation" / "u2netp.onnx"
     max_image_upload_bytes: int = 32 * 1024 * 1024
     max_audio_upload_bytes: int = 128 * 1024 * 1024
+    max_voice_sample_bytes: int = 64 * 1024 * 1024
     max_shorts_upload_bytes: int = 2 * 1024 * 1024 * 1024
+    # Comma-separated browser origins allowed by CORS. Defaults to the local
+    # Next.js dev server; set ENHANCEAI_CORS_ORIGINS to your deployed frontend.
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    # In-memory job store cap. Oldest finished jobs are evicted past this so a
+    # long-running server does not grow without bound.
+    max_jobs_retained: int = 1000
+    # Concurrent shorts analysis/render jobs. Each one drives ffmpeg + Whisper
+    # hard, so a small cap keeps the CPU from thrashing under load.
+    max_shorts_jobs: int = 2
+    # Generated outputs/uploads older than this are pruned on startup. 0 = keep.
+    output_retention_hours: int = 0
+    # Maximum clips accepted in a single shorts render request.
+    max_shorts_clips: int = 20
     # YuNet face detector (~230 KB) and GPEN-BFR-256 restorer (~72 MB), CPU-only.
     face_detector_path: Path = MODEL_DIR / "face" / "yunet.onnx"
     face_restorer_path: Path = MODEL_DIR / "face" / "gpen_bfr_256.onnx"
     local_cpu_warning_percent: float = 85.0
     local_cpu_critical_percent: float = 95.0
     omnivoice_breaker_recovery_seconds: int = 1800
-    omnivoice_breaker_heavy_recovery_seconds: int = 3600
     segmentation_breaker_recovery_seconds: int = 900
 
     model_config = SettingsConfigDict(env_prefix="ENHANCEAI_", env_file=".env")
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """CORS origins as a list. ``*`` (any) is passed through verbatim."""
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache
