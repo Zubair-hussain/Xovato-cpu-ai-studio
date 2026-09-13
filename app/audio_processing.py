@@ -36,6 +36,55 @@ class AudioProcessingError(RuntimeError):
     """Raised when audio cannot be decoded or processed."""
 
 
+# --------------------------------------------------------------------------- #
+# Vectorised sliding-window helpers (no SciPy, no Python-level frame loops)
+# --------------------------------------------------------------------------- #
+
+
+def _box_filter_axis(matrix: np.ndarray, size: int, axis: int) -> np.ndarray:
+    """Centred moving average of length ``size`` along ``axis``.
+
+    Matches ``np.convolve(..., mode="same")`` with a normalised box kernel, but
+    vectorised with ``sliding_window_view`` so it does not loop in Python over
+    every row/column the way ``np.apply_along_axis`` did.
+    """
+    if size <= 1:
+        return matrix
+    pad = size // 2
+    widths = [(0, 0)] * matrix.ndim
+    widths[axis] = (pad, size - 1 - pad)
+    padded = np.pad(matrix, widths)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, size, axis=axis)
+    return windows.mean(axis=-1).astype(matrix.dtype, copy=False)
+
+
+def _running_min(values: np.ndarray, radius: int) -> np.ndarray:
+    """Centred running minimum over ``2*radius+1`` samples in O(n) (van Herk).
+
+    Replaces an ``as_strided`` view that read past the end of the padded buffer
+    and cost ``O(n * window)``; this is exact and linear.
+    """
+    if radius < 1:
+        return values.astype(np.float64, copy=True)
+
+    length = 2 * radius + 1
+    n = values.shape[0]
+    padded = np.pad(values.astype(np.float64), (radius, radius), mode="edge")
+    m = padded.shape[0]
+
+    extra = (-m) % length
+    if extra:
+        padded = np.concatenate([padded, np.full(extra, np.inf)])
+
+    blocks = padded.reshape(-1, length)
+    forward = np.minimum.accumulate(blocks, axis=1).reshape(-1)
+    backward = np.minimum.accumulate(blocks[:, ::-1], axis=1)[:, ::-1].reshape(-1)
+
+    # Sliding minimum of window length `length` starting at j: min(backward[j], forward[j+length-1]).
+    window_min = np.minimum(backward[:n], forward[length - 1 : length - 1 + n])
+    return window_min
+
+
 @dataclass
 class AudioAnalysis:
     duration_seconds: float
@@ -115,7 +164,9 @@ def encode_audio(samples: np.ndarray, sample_rate: int, output_format: str) -> t
 # --------------------------------------------------------------------------- #
 
 
-def _biquad_magnitude(b: tuple[float, float, float], a: tuple[float, float, float], freqs: np.ndarray, sample_rate: int) -> np.ndarray:
+def _biquad_magnitude(
+    b: tuple[float, float, float], a: tuple[float, float, float], freqs: np.ndarray, sample_rate: int
+) -> np.ndarray:
     """Magnitude response of a biquad on the given frequency grid."""
     omega = 2.0 * np.pi * freqs / sample_rate
     z1 = np.exp(-1j * omega)
@@ -177,10 +228,12 @@ def measure_lufs(samples: np.ndarray, sample_rate: int) -> float:
         return -0.691 + 10.0 * np.log10(mean_square)
 
     starts = np.arange(0, weighted.shape[0] - block + 1, step)
-    powers = np.empty(len(starts), dtype=np.float64)
-    for index, start in enumerate(starts):
-        segment = weighted[start : start + block]
-        powers[index] = float(np.sum(np.mean(segment**2, axis=0)))
+    # Block mean-square per channel from a cumulative sum, then summed across
+    # channels - the same values the old per-block Python loop produced, in O(n).
+    squared = (weighted.astype(np.float64)) ** 2
+    cumulative = np.concatenate([np.zeros((1, squared.shape[1])), np.cumsum(squared, axis=0)], axis=0)
+    block_sums = cumulative[starts + block] - cumulative[starts]
+    powers = np.sum(block_sums / block, axis=1)
 
     loudness = -0.691 + 10.0 * np.log10(powers + _EPSILON)
 
@@ -215,27 +268,42 @@ def _stft(signal: np.ndarray, n_fft: int, hop: int) -> tuple[np.ndarray, int]:
 def _istft(spectrum: np.ndarray, n_fft: int, hop: int, length: int, output_length: int) -> np.ndarray:
     window = np.hanning(n_fft + 1)[:-1].astype(np.float32)
     frames = np.fft.irfft(spectrum, n=n_fft, axis=1) * window
+    frame_count = frames.shape[0]
 
     signal = np.zeros(length, dtype=np.float64)
     weight = np.zeros(length, dtype=np.float64)
-    for index in range(frames.shape[0]):
-        start = index * hop
-        signal[start : start + n_fft] += frames[index]
-        weight[start : start + n_fft] += window**2
+    window_sq = (window**2).astype(np.float64)
+
+    # Overlap-add without a per-frame Python loop. Frames spaced by groups*hop
+    # (>= n_fft) never overlap, so each residue group is one vectorised scatter.
+    # This is ceil(n_fft/hop) iterations (4 at 75% overlap) instead of one per
+    # frame, and is numerically identical to the old loop.
+    groups = -(-n_fft // hop)
+    offsets = np.arange(n_fft)
+    for group in range(groups):
+        indices = np.arange(group, frame_count, groups)
+        if indices.size == 0:
+            continue
+        positions = (indices * hop)[:, None] + offsets[None, :]
+        signal[positions] += frames[indices]
+        weight[positions] += window_sq
 
     signal /= np.maximum(weight, 1e-8)
     return signal[n_fft // 2 : n_fft // 2 + output_length].astype(np.float32)
 
 
 def _smooth(matrix: np.ndarray, time_span: int, freq_span: int) -> np.ndarray:
-    """Box-smooth a gain mask over time and frequency to suppress musical noise."""
+    """Box-smooth a gain mask over time and frequency to suppress musical noise.
+
+    Vectorised along each axis (see :func:`_box_filter_axis`); the old
+    ``np.apply_along_axis`` version ran one ``np.convolve`` per frame, ~100k
+    Python calls on a few minutes of audio.
+    """
     smoothed = matrix
     if time_span > 1:
-        kernel = np.ones(time_span, dtype=np.float32) / time_span
-        smoothed = np.apply_along_axis(lambda column: np.convolve(column, kernel, mode="same"), 0, smoothed)
+        smoothed = _box_filter_axis(smoothed, time_span, axis=0)
     if freq_span > 1:
-        kernel = np.ones(freq_span, dtype=np.float32) / freq_span
-        smoothed = np.apply_along_axis(lambda row: np.convolve(row, kernel, mode="same"), 1, smoothed)
+        smoothed = _box_filter_axis(smoothed, freq_span, axis=1)
     return smoothed
 
 
@@ -294,17 +362,13 @@ def _limit(samples: np.ndarray, ceiling_dbfs: float, sample_rate: int) -> tuple[
     required = np.minimum(1.0, ceiling / np.maximum(peak_envelope, _EPSILON))
 
     # Take a running minimum over a short window so gain dips slightly before
-    # each peak, then smooth it so the reduction is inaudible.
+    # each peak, then smooth it so the reduction is inaudible. The running min
+    # is an O(n) van Herk filter; the previous as_strided view was O(n*window)
+    # and read one window past the end of its buffer.
     window = max(1, int(0.005 * sample_rate))
-    padded = np.pad(required, (window, window), mode="edge")
-    strides = (padded.strides[0], padded.strides[0])
-    windows = np.lib.stride_tricks.as_strided(
-        padded, shape=(len(required) + window, 2 * window), strides=strides
-    )
-    running_min = windows.min(axis=1)[: len(required)]
+    running_min = _running_min(required, window)
 
-    kernel = np.ones(window * 2 + 1, dtype=np.float64) / (window * 2 + 1)
-    smoothed = np.convolve(running_min, kernel, mode="same")
+    smoothed = _box_filter_axis(running_min, window * 2 + 1, axis=0)
     smoothed = np.minimum(smoothed, required)
 
     return (samples * smoothed[:, None]).astype(np.float32), True
