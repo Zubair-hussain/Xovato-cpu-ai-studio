@@ -116,18 +116,14 @@ def _get_session(model_path: Path):
         try:
             import onnxruntime as ort
         except ImportError as error:  # pragma: no cover - dependency guard
-            raise ImageProcessingError(
-                "onnxruntime is not installed; run pip install -r requirements.txt"
-            ) from error
+            raise ImageProcessingError("onnxruntime is not installed; run pip install -r requirements.txt") from error
 
         options = ort.SessionOptions()
         # Keep the footprint small and predictable on a laptop CPU.
         options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 2))
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-        _session = ort.InferenceSession(
-            str(model_path), sess_options=options, providers=["CPUExecutionProvider"]
-        )
+        _session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
         _session_path = model_path
         logger.info(
             "segmentation model loaded",
@@ -169,8 +165,15 @@ def _aspect_label(width: int, height: int) -> str:
     if w > 32 or h > 32:
         ratio = width / height
         for label, value in (
-            ("1:1", 1.0), ("4:3", 4 / 3), ("3:2", 3 / 2), ("16:9", 16 / 9), ("3:4", 3 / 4),
-            ("2:3", 2 / 3), ("9:16", 9 / 16), ("5:4", 5 / 4), ("4:5", 4 / 5),
+            ("1:1", 1.0),
+            ("4:3", 4 / 3),
+            ("3:2", 3 / 2),
+            ("16:9", 16 / 9),
+            ("3:4", 3 / 4),
+            ("2:3", 2 / 3),
+            ("9:16", 9 / 16),
+            ("5:4", 5 / 4),
+            ("4:5", 4 / 5),
         ):
             if abs(ratio - value) < 0.02:
                 return label
@@ -218,10 +221,13 @@ def analyze_image(image: Image.Image) -> ImageAnalysis:
 
     # A 3x3 median removes sensor noise while keeping real edges, so it serves
     # as the reference for both the noise and the sharpness measurement.
-    median = np.asarray(
-        Image.fromarray((luma * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(3)),
-        dtype=np.float32,
-    ) / 255.0
+    median = (
+        np.asarray(
+            Image.fromarray((luma * 255).astype(np.uint8)).filter(ImageFilter.MedianFilter(3)),
+            dtype=np.float32,
+        )
+        / 255.0
+    )
 
     # Noise: the high frequency energy the median removed.
     noise = float(np.clip(np.median(np.abs(luma - median)) * 40.0, 0.0, 1.0))
@@ -229,13 +235,7 @@ def analyze_image(image: Image.Image) -> ImageAnalysis:
     # Sharpness: variance of a 4-neighbour Laplacian, measured on the denoised
     # luma. Measuring it on the raw luma would let grain masquerade as detail
     # and leave genuinely soft photos under-sharpened.
-    laplacian = (
-        -4.0 * median[1:-1, 1:-1]
-        + median[:-2, 1:-1]
-        + median[2:, 1:-1]
-        + median[1:-1, :-2]
-        + median[1:-1, 2:]
-    )
+    laplacian = -4.0 * median[1:-1, 1:-1] + median[:-2, 1:-1] + median[2:, 1:-1] + median[1:-1, :-2] + median[1:-1, 2:]
     sharpness = float(np.clip(laplacian.var() * 900.0, 0.0, 1.0))
 
     # Blur scale is measured on the thumbnail, then rescaled to source pixels so
@@ -335,7 +335,11 @@ def _detail_scale(luma_image: Image.Image) -> float:
     base = np.asarray(luma_image, dtype=np.float32) / 255.0
     radii = (0.8, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0)
     energies = [
-        float(np.mean(np.abs(base - np.asarray(luma_image.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32) / 255.0)))
+        float(
+            np.mean(
+                np.abs(base - np.asarray(luma_image.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32) / 255.0)
+            )
+        )
         for radius in radii
     ]
 
@@ -348,7 +352,7 @@ def _detail_scale(luma_image: Image.Image) -> float:
     # scale. The first radius that lifts energy above ~6% of the full-scale total
     # is therefore the width of the softest edges. Calibrated against known
     # Gaussian blurs: sharp -> ~1px, blur 2 -> 2px, blur 4 -> 4px, blur 16 -> 8px.
-    for radius, energy in zip(radii, energies):
+    for radius, energy in zip(radii, energies, strict=False):
         if energy >= 0.06 * total:
             return radius
     return radii[-1]
@@ -435,9 +439,7 @@ def run_enhancement(
     clarity_radius = max(6.0, min(working.width, working.height) / 45.0)
     clarity_amount = int(np.clip((0.22 - post_luma.std()) * 320.0 + 28.0, 18.0, 70.0) * strength)
     if clarity_amount > 0:
-        working = working.filter(
-            ImageFilter.UnsharpMask(radius=clarity_radius, percent=clarity_amount, threshold=0)
-        )
+        working = working.filter(ImageFilter.UnsharpMask(radius=clarity_radius, percent=clarity_amount, threshold=0))
         actions.append(f"added local contrast ({clarity_amount}% at r={clarity_radius:.0f})")
 
     # 5. Saturation - lift dull images, and pull back ones already oversaturated.
@@ -480,9 +482,7 @@ def run_enhancement(
     threshold = 3 if analysis.noise > 0.25 else 2
 
     if amount > 0:
-        working = working.filter(
-            ImageFilter.UnsharpMask(radius=radius, percent=amount, threshold=threshold)
-        )
+        working = working.filter(ImageFilter.UnsharpMask(radius=radius, percent=amount, threshold=threshold))
         actions.append(f"unsharp mask matched to blur ({amount}% at r={radius:.1f})")
 
     # Be honest when the blur is past the point classical sharpening can help.
@@ -497,12 +497,15 @@ def _describe(analysis: ImageAnalysis, actions: list[str], prefix: str = "") -> 
     """Attach the action list and a measurement summary to the analysis."""
     analysis.actions = actions
     analysis.summary = (
-        prefix
-        + f"Measured {analysis.width}x{analysis.height} ({analysis.aspect_ratio}): "
+        prefix + f"Measured {analysis.width}x{analysis.height} ({analysis.aspect_ratio}): "
         f"exposure {analysis.exposure:.2f}, contrast {analysis.contrast:.2f}, "
         f"saturation {analysis.saturation:.2f}, noise {analysis.noise:.2f}, "
         f"blur scale {analysis.blur_scale:.1f}px"
-        + (f", {analysis.clipped_highlights * 100:.1f}% blown highlights" if analysis.clipped_highlights > 0.005 else "")
+        + (
+            f", {analysis.clipped_highlights * 100:.1f}% blown highlights"
+            if analysis.clipped_highlights > 0.005
+            else ""
+        )
         + f". Applied {len(actions)} measured corrections."
     )
 
@@ -554,9 +557,7 @@ def restore_faces_image(
     actions = list(face_actions)
 
     if enhance_whole_image:
-        restored, enhancement_actions = run_enhancement(
-            restored, analysis, resolution=resolution, strength=0.65
-        )
+        restored, enhancement_actions = run_enhancement(restored, analysis, resolution=resolution, strength=0.65)
         actions.extend(enhancement_actions)
     else:
         out_width, out_height = target_size(restored.width, restored.height, resolution)
@@ -589,12 +590,9 @@ def _box_filter(src: np.ndarray, radius: int) -> np.ndarray:
         cumulative = np.cumsum(values, axis=0)
         out = np.empty_like(values)
         out[: radius + 1] = cumulative[radius : 2 * radius + 1]
-        out[radius + 1 : height - radius] = (
-            cumulative[2 * radius + 1 :] - cumulative[: height - 2 * radius - 1]
-        )
+        out[radius + 1 : height - radius] = cumulative[2 * radius + 1 :] - cumulative[: height - 2 * radius - 1]
         out[height - radius :] = (
-            cumulative[height - 1][None, :]
-            - cumulative[height - 2 * radius - 1 : height - radius - 1]
+            cumulative[height - 1][None, :] - cumulative[height - 2 * radius - 1 : height - radius - 1]
         )
         return out
 
@@ -602,12 +600,9 @@ def _box_filter(src: np.ndarray, radius: int) -> np.ndarray:
         cumulative = np.cumsum(values, axis=1)
         out = np.empty_like(values)
         out[:, : radius + 1] = cumulative[:, radius : 2 * radius + 1]
-        out[:, radius + 1 : width - radius] = (
-            cumulative[:, 2 * radius + 1 :] - cumulative[:, : width - 2 * radius - 1]
-        )
+        out[:, radius + 1 : width - radius] = cumulative[:, 2 * radius + 1 :] - cumulative[:, : width - 2 * radius - 1]
         out[:, width - radius :] = (
-            cumulative[:, width - 1][:, None]
-            - cumulative[:, width - 2 * radius - 1 : width - radius - 1]
+            cumulative[:, width - 1][:, None] - cumulative[:, width - 2 * radius - 1 : width - radius - 1]
         )
         return out
 
@@ -641,9 +636,7 @@ def _predict_mask(image: Image.Image, model_path: Path) -> np.ndarray:
     """Run u2netp and return a 0..1 float mask at the network's resolution."""
     session = _get_session(model_path)
 
-    resized = image.convert("RGB").resize(
-        (_MODEL_INPUT_SIZE, _MODEL_INPUT_SIZE), Image.LANCZOS
-    )
+    resized = image.convert("RGB").resize((_MODEL_INPUT_SIZE, _MODEL_INPUT_SIZE), Image.LANCZOS)
     tensor = np.asarray(resized, dtype=np.float32) / 255.0
     tensor = (tensor - _IMAGENET_MEAN) / _IMAGENET_STD
     tensor = tensor.transpose(2, 0, 1)[None, ...].astype(np.float32)
@@ -678,9 +671,7 @@ def remove_background(
     actions.append("segmented subject with u2netp (CPU)")
 
     # Upscale the coarse mask, then snap it to the photo's own edges.
-    mask_image = Image.fromarray((coarse * 255).astype(np.uint8), mode="L").resize(
-        rgb.size, Image.BICUBIC
-    )
+    mask_image = Image.fromarray((coarse * 255).astype(np.uint8), mode="L").resize(rgb.size, Image.BICUBIC)
     alpha = np.asarray(mask_image, dtype=np.float32) / 255.0
 
     guide = _luminance(np.asarray(rgb, dtype=np.float32) / 255.0)
