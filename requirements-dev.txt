@@ -1,0 +1,8 @@
+# Development and test dependencies. Install with:
+#   pip install -r requirements-dev.txt
+-r requirements.txt
+-r requirements-security.txt
+pytest==8.4.1
+pytest-cov==7.1.0
+pytest-html==4.2.0
+ruff==0.8.4
