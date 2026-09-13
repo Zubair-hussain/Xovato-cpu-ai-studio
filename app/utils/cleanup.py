@@ -12,4 +12,3 @@ def remove_expired_files(root: str | Path, older_than: datetime) -> int:
             path.unlink()
             removed += 1
     return removed
-
