@@ -28,7 +28,13 @@ The frontend needs public URLs. The backend needs CPU runtime settings and optio
 | `ENHANCEAI_ENVIRONMENT` | Marks runtime as production. |
 | `ENHANCEAI_USE_REAL_OMNIVOICE` | Defaults false for CPU-friendly deploy. |
 | `ENHANCEAI_OMNIVOICE_QUANTIZE_INT8` | Keeps optional CPU TTS lighter when enabled. |
+| `ENHANCEAI_CORS_ORIGINS` | Comma-separated allowed browser origins. Set to your deployed frontend. |
+| `ENHANCEAI_MAX_JOBS_RETAINED` | Cap on the in-memory job store; oldest finished jobs are evicted. |
+| `ENHANCEAI_MAX_SHORTS_JOBS` | Concurrent shorts analysis/render jobs. |
+| `ENHANCEAI_OUTPUT_RETENTION_HOURS` | Prune generated files older than this on startup (0 = keep). |
 
-Never expose `SUPABASE_SERVICE_ROLE_KEY` in frontend/browser env.
+Never expose `SUPABASE_SERVICE_ROLE_KEY` in frontend/browser env. The backend
+requires the **service-role** key for output sync; the anon key is not accepted
+for server-side writes (it is subject to row-level security).
 
 Supabase SQL is not bundled in this deployment folder. Keep database setup separate from backend deployment.
