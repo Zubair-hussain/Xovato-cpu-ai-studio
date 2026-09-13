@@ -15,9 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def _local_env_values() -> dict[str, str]:
+    # Only the backend's own .env - never a sibling frontend's .env.local, which
+    # would pull the browser-safe anon key into server-side writes.
     roots = [
         Path(__file__).resolve().parents[1] / ".env",
-        Path(__file__).resolve().parents[2] / "xovato-app" / ".env.local",
     ]
     values: dict[str, str] = {}
     for path in roots:
@@ -36,7 +37,13 @@ _LOCAL_ENV = _local_env_values()
 
 
 def _env(name: str) -> str:
-    return os.getenv(name) or os.getenv(f"ENHANCEAI_{name}") or _LOCAL_ENV.get(name) or _LOCAL_ENV.get(f"ENHANCEAI_{name}") or ""
+    return (
+        os.getenv(name)
+        or os.getenv(f"ENHANCEAI_{name}")
+        or _LOCAL_ENV.get(name)
+        or _LOCAL_ENV.get(f"ENHANCEAI_{name}")
+        or ""
+    )
 
 
 def supabase_output_enabled() -> bool:
@@ -49,7 +56,10 @@ def output_bucket_name() -> str:
 
 def _supabase_config() -> tuple[str, str] | None:
     url = _env("SUPABASE_URL") or _env("NEXT_PUBLIC_SUPABASE_URL")
-    key = _env("SUPABASE_SERVICE_ROLE_KEY") or _env("SUPABASE_ANON_KEY") or _env("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    # Server-side inserts and storage uploads need the service-role key. The
+    # anon key is subject to RLS and would silently fail (or require
+    # world-writable policies), so it is not accepted here.
+    key = _env("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         return None
     return url.rstrip("/"), key.strip()
