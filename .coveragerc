@@ -1,0 +1,17 @@
+[run]
+source = app
+omit =
+    app/services/audio_enhancement.py
+    app/services/background_removal.py
+    app/services/face_enhancement.py
+    app/services/image_enhancement.py
+    app/services/transcription.py
+    app/services/video_processing.py
+    app/services/voice_cloning.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise NotImplementedError
+    except ImportError
