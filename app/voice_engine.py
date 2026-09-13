@@ -33,7 +33,7 @@ class VoiceEngineError(RuntimeError):
     """Raised when the engine cannot load or synthesis fails."""
 
 
-def _load_reference_waveform(path: Path) -> tuple["object", int]:
+def _load_reference_waveform(path: Path) -> tuple[object, int]:
     """Decode reference audio to a (waveform, sample_rate) tuple for OmniVoice.
 
     OmniVoice's own loader calls ``torchaudio.load``, which in torchaudio 2.11
@@ -155,9 +155,7 @@ class VoiceEngine:
                     # on integer kernels. Quality loss on TTS is minor next to
                     # the difference between "usable" and "several minutes".
                     try:
-                        model = torch.quantization.quantize_dynamic(
-                            model, {torch.nn.Linear}, dtype=torch.qint8
-                        )
+                        model = torch.quantization.quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
                         logger.info(
                             "voice engine quantised to int8",
                             extra={"module_name": "text-to-speech", "action": "engine-quantise"},
@@ -249,9 +247,7 @@ class VoiceEngine:
             raise VoiceEngineError("There is no text to synthesise.")
 
         num_step = num_step if num_step is not None else settings.omnivoice_num_step
-        guidance_scale = (
-            guidance_scale if guidance_scale is not None else settings.omnivoice_guidance_scale
-        )
+        guidance_scale = guidance_scale if guidance_scale is not None else settings.omnivoice_guidance_scale
 
         load_started = time.monotonic()
         model = self.load(settings)
