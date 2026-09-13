@@ -14,8 +14,13 @@ Deployment is easier when you know which workflows are real, partial, or preview
 | Background removal | Connected if model exists | Needs `models/segmentation/u2netp.onnx`. |
 | Face restoration | Connected if models exist | Needs `models/face/yunet.onnx` and `models/face/gpen_bfr_256.onnx`. |
 | Audio enhancement | Connected | CPU code-based enhancement is available. |
-| Text to speech | Fallback connected, real model optional | Real OmniVoice is disabled by default for CPU deployment. |
-| Voice cloning | Partial | Local profile/sample flow exists; production model hosting still needs planning. |
-| Subtitle generation | Preview only | UI exists; real Whisper/subtitle backend still needs integration. |
-| Shorts/video cuts | Partial | Upload/analyze/render pieces exist; advanced AI ranking/captions are not fully connected. |
-| Supabase output sync | Optional | Requires Supabase env and database setup outside this deployment package. |
+| Text to speech | Fallback connected, real model optional | Real OmniVoice is disabled by default for CPU deployment; `/v1/audio/speech` now returns real WAV. |
+| Voice cloning | Connected (consent-gated) | Profile/sample flow works; `consent_verified` must be true to create a clone. |
+| Voice design | Connected | Gender/age/accent/pitch map onto the model's real instruct attributes. |
+| Subtitle generation | Connected via shorts pipeline | `/v1/audio/transcriptions` runs faster-whisper; the `/voice/transcriptions` job is flagged `preview`. |
+| Shorts/video cuts | Connected | Upload/analyze/render work; ranking is heuristic by default, LLM when a key is set. |
+| Supabase output sync | Optional | Requires the Supabase **service-role** key and database setup outside this package. |
+
+Endpoints that are still stubs (`/voice/transcriptions`, `/voice/dubbing`,
+`/voice/audiobooks`, `/voice/stories`) now return a job whose `result.preview`
+is `true`, instead of reporting a completed file that does not exist.
