@@ -2,23 +2,27 @@ import base64
 import json
 import logging
 import os
+import re
+import threading
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import soundfile as sf
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from app.config import get_settings
 from app.audio_processing import (
     OUTPUT_MIME_TYPES,
     SUPPORTED_INPUT_FORMATS,
     AudioProcessingError,
     enhance_audio,
 )
+from app.config import get_settings
 from app.face_restoration import FaceRestorationError, face_models_available
 from app.image_processing import (
-    ImageProcessingError,
     MIME_TYPES,
+    ImageProcessingError,
     enhance_image,
     remove_background,
     resolve_format,
@@ -43,16 +47,19 @@ from app.models import (
     VoiceProfileCreate,
     VoiceSample,
 )
+from app.omnivoice_runtime import model_ready
+from app.services import job_store, omnivoice_breaker, segmentation_breaker, system_health, voice_store
 from app.shorts_media import ShortsMediaError, ensure_ffmpeg
 from app.shorts_service import (
+    UploadTooLarge,
     create_analysis_job,
-    project_dir as shorts_project_dir,
     run_analysis,
     run_render,
     save_upload,
 )
-from app.omnivoice_runtime import model_ready
-from app.services import job_store, omnivoice_breaker, segmentation_breaker, system_health, voice_store
+from app.shorts_service import (
+    project_dir as shorts_project_dir,
+)
 from app.supabase_output import output_bucket_name, record_completed_output, supabase_output_enabled
 from app.voice_engine import VoiceEngineError, voice_engine
 from app.voice_library import get_stock_voice, library_payload
@@ -63,8 +70,6 @@ from app.voice_styles import (
     instruct_string,
     resolve_style,
 )
-
-import soundfile as sf
 
 settings = get_settings()
 configure_logging(settings.log_level, settings.log_dir)
@@ -78,13 +83,49 @@ app = FastAPI(
     description="Local core backend for image, audio, and voice AI media workflows.",
 )
 
+# Bound the number of shorts jobs (ffmpeg + Whisper) that run at once so a burst
+# of uploads cannot saturate the CPU and starve every other endpoint.
+_shorts_semaphore = threading.BoundedSemaphore(max(1, settings.max_shorts_jobs))
+
+# Project ids are minted as ``proj_<12 hex>``; reject anything else so the value
+# cannot be used to walk the filesystem from the render endpoint.
+_PROJECT_ID_RE = re.compile(r"^proj_[0-9a-f]{12}$")
+
+
+def _guarded_shorts_task(func, *args, **kwargs) -> None:
+    """Run a shorts background task while holding the concurrency semaphore."""
+    with _shorts_semaphore:
+        func(*args, **kwargs)
+
+
+@app.on_event("startup")
+def _prune_old_outputs() -> None:
+    """Delete generated files older than the retention window, if one is set."""
+    hours = settings.output_retention_hours
+    if hours <= 0:
+        return
+    from app.utils.cleanup import remove_expired_files
+
+    cutoff = datetime.now(UTC) - timedelta(hours=hours)
+    for root in (voice_store.outputs_dir, voice_store.samples_dir, settings.data_dir / "shorts"):
+        if root.exists():
+            removed = remove_expired_files(root, cutoff)
+            if removed:
+                logger.info(
+                    "pruned expired files",
+                    extra={"module_name": "system-health", "action": "retention-prune", "removed": removed},
+                )
+
+
+_cors_origins = settings.cors_origin_list
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    # Credentials cannot be combined with a wildcard origin per the CORS spec.
+    allow_credentials="*" not in _cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Image-Analysis", "X-Job-Id", "X-Output-Format", "X-Module"],
+    expose_headers=["X-Image-Analysis", "X-Audio-Analysis", "X-Job-Id", "X-Output-Format", "X-Module"],
 )
 
 
@@ -232,7 +273,10 @@ def run_job(job_id: str) -> Job:
                     "circuit_breaker": breaker_status,
                 },
             )
-        segmentation_breaker.record_success()
+        # NB: do NOT record a breaker success here. This endpoint does no real
+        # segmentation work, so counting it as a success would let anyone reset
+        # the breaker with an empty job. The breaker is managed only where the
+        # model actually runs (the background-removal endpoint).
 
     completed = job_store.mark_completed(job_id, output_uri=f"local://outputs/{job_id}")
     if completed is None:
@@ -250,7 +294,9 @@ def list_voice_engines() -> dict[str, object]:
     ready = model_ready(settings.omnivoice_model_dir)
     breaker_status = omnivoice_breaker.status()
     return {
-        "active_tts": "omnivoice-cpu" if ready and settings.use_real_omnivoice and breaker_status["state"] != "open" else "preview-wav",
+        "active_tts": "omnivoice-cpu"
+        if ready and settings.use_real_omnivoice and breaker_status["state"] != "open"
+        else "preview-wav",
         "active_asr": "whisper-local",
         "hardware": {"cuda": False, "mps": False, "cpu": True},
         "model_ready": ready,
@@ -263,6 +309,15 @@ def list_voice_engines() -> dict[str, object]:
 
 @app.post(f"{settings.api_prefix}/voice/profiles", response_model=VoiceProfile, status_code=status.HTTP_201_CREATED)
 def create_voice_profile(payload: VoiceProfileCreate) -> VoiceProfile:
+    # Cloning a voice requires explicit consent from the person being cloned.
+    if not payload.consent_verified:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "consent_verified must be true. Only clone a voice with the explicit "
+                "consent of the person it belongs to."
+            ),
+        )
     profile = voice_store.create_clone(payload)
     logger.info("voice profile cloned", extra={"module_name": "voice-cloning", "action": "profile-create"})
     return profile
@@ -280,7 +335,15 @@ def upload_voice_sample(sample: UploadFile = File(...)) -> VoiceSample:
         if not (sample.filename or "").lower().endswith(allowed):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Upload an audio sample file")
 
-    saved = voice_store.save_sample(sample.filename or "voice-sample.wav", sample.content_type or "", sample.file)
+    try:
+        saved = voice_store.save_sample(
+            sample.filename or "voice-sample.wav",
+            sample.content_type or "",
+            sample.file,
+            max_bytes=settings.max_voice_sample_bytes,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(error)) from error
     logger.info(
         "voice sample stored",
         extra={"module_name": "voice-cloning", "action": "sample-upload", "sample_id": saved.id},
@@ -296,7 +359,7 @@ def design_voice(payload: VoiceDesignRequest) -> VoiceProfile:
 
 
 @app.post(f"{settings.api_prefix}/voice/speech", response_model=Job, status_code=status.HTTP_201_CREATED)
-def synthesize_speech(payload: SpeechRequest) -> Job:
+def synthesize_speech(payload: SpeechRequest, background: BackgroundTasks) -> Job:
     """Synthesise speech, cloning a stored voice profile when one is selected."""
     # A voice id is either one of the built-in stock voices (voice design mode,
     # no reference audio needed) or a cloned profile the user created.
@@ -309,10 +372,19 @@ def synthesize_speech(payload: SpeechRequest) -> Job:
             detail=f"Voice '{payload.voice_id}' was not found in the stock library or your cloned profiles.",
         )
 
+    # A stock voice's identity, or a design profile's derived attributes, form
+    # the base instruct layer the emotion and per-request overrides build on.
+    if stock_voice:
+        base_instruct = list(stock_voice.instruct_items)
+    elif profile and profile.design_instruct:
+        base_instruct = list(profile.design_instruct)
+    else:
+        base_instruct = None
+
     try:
         style = resolve_style(
             payload.emotion,
-            base_instruct=list(stock_voice.instruct_items) if stock_voice else None,
+            base_instruct=base_instruct,
             extra_instruct=payload.instruct,
             speed=payload.speed,
             speed_multiplier=stock_voice.default_speed if stock_voice else 1.0,
@@ -355,7 +427,9 @@ def synthesize_speech(payload: SpeechRequest) -> Job:
 
     if not settings.use_real_omnivoice:
         completed = job_store.mark_completed(job.id, voice_store.write_preview_wav(job.id, payload.text)) or job
-        record_completed_output(completed, voice_store)
+        # Supabase sync can take up to ~80s on a slow network; run it after the
+        # response is sent instead of blocking the caller.
+        background.add_task(record_completed_output, completed, voice_store)
         return completed
 
     if not omnivoice_breaker.allow_request():
@@ -416,7 +490,7 @@ def synthesize_speech(payload: SpeechRequest) -> Job:
         },
     )
     completed = job_store.mark_completed(job.id, voice_store.uri_for_path(output_path)) or job
-    record_completed_output(completed, voice_store)
+    background.add_task(record_completed_output, completed, voice_store)
     return completed
 
 
@@ -480,6 +554,22 @@ def unload_voice_engine() -> dict[str, object]:
     return voice_engine.status()
 
 
+# These modules have a UI and a job shape but no wired-up backend yet. Rather
+# than reporting a plain "completed" with an output file that does not exist,
+# the job carries an explicit preview flag so callers can tell it is a stub.
+_PREVIEW_NOTE = (
+    "This module is a preview: the job is recorded but no media is produced yet. "
+    "Wire the real backend before relying on the output_uri."
+)
+
+
+def _preview_job(job: Job, output_uri: str) -> Job:
+    job_store.set_result(job.id, {"preview": True, "detail": _PREVIEW_NOTE})
+    completed = job_store.mark_completed(job.id, output_uri) or job
+    completed.stage = "preview"
+    return completed
+
+
 @app.post(f"{settings.api_prefix}/voice/transcriptions", response_model=Job, status_code=status.HTTP_201_CREATED)
 def transcribe_audio(payload: TranscriptionRequest) -> Job:
     job = job_store.create(
@@ -488,10 +578,14 @@ def transcribe_audio(payload: TranscriptionRequest) -> Job:
             media_type=MediaType.audio,
             input_uri=payload.audio_uri,
             model_chain=["whisper-local"],
-            settings={"language": payload.language or "auto", "response_format": payload.response_format, "diarize": payload.diarize},
+            settings={
+                "language": payload.language or "auto",
+                "response_format": payload.response_format,
+                "diarize": payload.diarize,
+            },
         )
     )
-    return job_store.mark_completed(job.id, f"local://outputs/{job.id}.{payload.response_format}") or job
+    return _preview_job(job, f"local://outputs/{job.id}.{payload.response_format}")
 
 
 @app.post(f"{settings.api_prefix}/voice/dubbing", response_model=Job, status_code=status.HTTP_201_CREATED)
@@ -506,7 +600,7 @@ def create_dub(payload: DubbingRequest) -> Job:
             settings=settings_payload,
         )
     )
-    return job_store.mark_completed(job.id, f"local://outputs/{job.id}.{payload.export_format}") or job
+    return _preview_job(job, f"local://outputs/{job.id}.{payload.export_format}")
 
 
 @app.post(f"{settings.api_prefix}/voice/audiobooks", response_model=Job, status_code=status.HTTP_201_CREATED)
@@ -521,7 +615,7 @@ def create_audiobook(payload: AudiobookRequest) -> Job:
             settings=settings_payload,
         )
     )
-    return job_store.mark_completed(job.id, f"local://outputs/{job.id}.m4b") or job
+    return _preview_job(job, f"local://outputs/{job.id}.m4b")
 
 
 @app.post(f"{settings.api_prefix}/voice/stories", response_model=Job, status_code=status.HTTP_201_CREATED)
@@ -535,7 +629,7 @@ def create_story(payload: StoryRequest) -> Job:
             settings={"title": payload.title, "line_count": len(payload.lines), "export_format": payload.export_format},
         )
     )
-    return job_store.mark_completed(job.id, f"local://outputs/{job.id}.{payload.export_format}") or job
+    return _preview_job(job, f"local://outputs/{job.id}.{payload.export_format}")
 
 
 @app.get(f"{settings.api_prefix}/voice/diagnostics")
@@ -587,13 +681,16 @@ def _read_upload(image: UploadFile) -> bytes:
             detail="Upload a PNG, JPG, WEBP, BMP, GIF, or TIFF image.",
         )
 
-    data = image.file.read()
+    # Read one byte past the limit: if we get it, the upload is over the cap and
+    # we reject it without pulling the whole (possibly huge) body into memory.
+    limit = settings.max_image_upload_bytes
+    data = image.file.read(limit + 1)
     if not data:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="The uploaded image was empty.")
-    if len(data) > settings.max_image_upload_bytes:
+    if len(data) > limit:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Image exceeds the {settings.max_image_upload_bytes // (1024 * 1024)} MB upload limit.",
+            detail=f"Image exceeds the {limit // (1024 * 1024)} MB upload limit.",
         )
     return data
 
@@ -605,9 +702,7 @@ def _image_response(payload: bytes, analysis, pillow_format: str, module: str, j
         content=payload,
         media_type=MIME_TYPES.get(pillow_format, "application/octet-stream"),
         headers={
-            "X-Image-Analysis": base64.b64encode(
-                json.dumps(analysis.as_dict()).encode("utf-8")
-            ).decode("ascii"),
+            "X-Image-Analysis": base64.b64encode(json.dumps(analysis.as_dict()).encode("utf-8")).decode("ascii"),
             "X-Job-Id": job_id,
             "X-Output-Format": pillow_format,
             "X-Module": module,
@@ -671,8 +766,21 @@ def remove_background_endpoint(
     edge_softness: float = Form(1.0),
 ) -> Response:
     data = _read_upload(image)
-    breaker_status = segmentation_breaker.status()
 
+    # A missing model is a configuration problem, not a runtime failure - check
+    # it *before* the breaker and do not record it as a failure. Otherwise two
+    # requests with no model file would open the breaker and keep background
+    # removal disabled for 15 minutes even after the file is added.
+    if not segmentation_model_available(settings.segmentation_model_path):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Segmentation model is missing. Download u2netp.onnx to "
+                f"{settings.segmentation_model_path} to enable background removal."
+            ),
+        )
+
+    breaker_status = segmentation_breaker.status()
     if not segmentation_breaker.allow_request():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -680,16 +788,6 @@ def remove_background_endpoint(
                 "message": "Segmentation is paused after repeated failures.",
                 "circuit_breaker": breaker_status,
             },
-        )
-
-    if not segmentation_model_available(settings.segmentation_model_path):
-        segmentation_breaker.record_failure("Segmentation model is missing.")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Segmentation model is missing. Download u2netp.onnx to "
-                f"{settings.segmentation_model_path} to enable background removal."
-            ),
         )
 
     job = job_store.create(
@@ -824,13 +922,14 @@ def enhance_audio_endpoint(
             detail="Upload a WAV, MP3, FLAC, OGG, or AIFF file. M4A/AAC is not supported.",
         )
 
-    data = audio.file.read()
+    limit = settings.max_audio_upload_bytes
+    data = audio.file.read(limit + 1)
     if not data:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="The uploaded audio was empty.")
-    if len(data) > settings.max_audio_upload_bytes:
+    if len(data) > limit:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Audio exceeds the {settings.max_audio_upload_bytes // (1024 * 1024)} MB upload limit.",
+            detail=f"Audio exceeds the {limit // (1024 * 1024)} MB upload limit.",
         )
 
     job = job_store.create(
@@ -909,26 +1008,40 @@ def analyze_shorts(
         )
 
     project_id = f"proj_{uuid4().hex[:12]}"
-    source = save_upload(settings, project_id, media.filename or "source.mp4", media.file)
-
-    size = source.stat().st_size
-    if size > settings.max_shorts_upload_bytes:
-        source.unlink(missing_ok=True)
+    try:
+        # Enforce the size limit while streaming to disk, so an oversized upload
+        # is rejected before it can fill the disk.
+        source = save_upload(
+            settings,
+            project_id,
+            media.filename or "source.mp4",
+            media.file,
+            max_bytes=settings.max_shorts_upload_bytes,
+        )
+    except UploadTooLarge as error:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Media exceeds the {settings.max_shorts_upload_bytes // (1024 * 1024)} MB upload limit.",
-        )
+        ) from error
+
+    size = source.stat().st_size
+
+    # Clamp min_len first, then derive max_len from the clamped value - otherwise
+    # a tiny min_len with a smaller max_len could yield max_len < min_len.
+    clamped_min = max(3.0, min_len)
+    clamped_max = max(clamped_min + 1.0, max_len)
 
     job_id = create_analysis_job(project_id, media.filename or "source")
     background.add_task(
+        _guarded_shorts_task,
         run_analysis,
         settings,
         job_id=job_id,
         project_id=project_id,
         source=source,
         target_count=max(1, min(target_count, 20)),
-        min_len=max(3.0, min_len),
-        max_len=max(min_len + 1.0, max_len),
+        min_len=clamped_min,
+        max_len=clamped_max,
         transcribe_provider=transcribe_provider,
         ranking_provider=ranking_provider,
     )
@@ -946,6 +1059,11 @@ def render_shorts(
     background: BackgroundTasks,
     payload: ShortsRenderRequest,
 ) -> dict[str, object]:
+    # Validate the id shape before touching the filesystem so it cannot be used
+    # to escape the shorts directory (e.g. "..").
+    if not _PROJECT_ID_RE.match(project_id):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid project id.")
+
     directory = shorts_project_dir(settings, project_id)
     source = next((path for path in directory.glob("source.*")), None)
     if source is None:
@@ -965,6 +1083,7 @@ def render_shorts(
     )
 
     background.add_task(
+        _guarded_shorts_task,
         run_render,
         settings,
         job_id=job.id,
@@ -1060,10 +1179,23 @@ def image_capabilities() -> dict[str, object]:
     }
 
 
+# Only these subtrees of data/ are downloadable. Logs and the voice-profile
+# index (which lists every user's voices) live elsewhere under data/ and must
+# not be reachable through this endpoint.
+_SERVABLE_ROOTS = ("outputs", "shorts")
+
+
 @app.get(f"{settings.api_prefix}/files/{{local_path:path}}")
 def read_local_file(local_path: str) -> FileResponse:
     path = voice_store.resolve_local_uri(f"local://{local_path}")
     if path is None or not path.exists() or not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+
+    data_root = voice_store.data_dir.resolve()
+    allowed = any(path == (data_root / root) or (data_root / root) in path.parents for root in _SERVABLE_ROOTS)
+    if not allowed:
+        # 404 rather than 403 so we do not confirm the existence of files (logs,
+        # profile index) outside the servable roots.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
     return FileResponse(path)
 
@@ -1071,16 +1203,54 @@ def read_local_file(local_path: str) -> FileResponse:
 @app.get("/v1/audio/voices")
 def openai_list_voices() -> dict[str, object]:
     voices = voice_store.list()
-    return {"object": "list", "data": [{"id": voice.id, "name": voice.name, "language": voice.language} for voice in voices]}
+    return {
+        "object": "list",
+        "data": [{"id": voice.id, "name": voice.name, "language": voice.language} for voice in voices],
+    }
 
 
 @app.post("/v1/audio/speech")
-def openai_speech(payload: OpenAISpeechRequest) -> Response:
-    content = f"Simulated {payload.response_format} audio for voice {payload.voice}: {payload.input}".encode()
-    media_type = "audio/wav" if payload.response_format == "wav" else "application/octet-stream"
-    return Response(content=content, media_type=media_type)
+def openai_speech(payload: OpenAISpeechRequest, background: BackgroundTasks) -> Response:
+    """OpenAI-compatible speech endpoint.
+
+    Only ``wav`` is produced (the local OmniVoice backend's single format). This
+    routes through the real synthesis path instead of returning text bytes
+    mislabelled as audio, which corrupted any OpenAI client that called it.
+    """
+    if payload.response_format != "wav":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only 'wav' response_format is supported by the local backend.",
+        )
+
+    speech = synthesize_speech(
+        SpeechRequest(text=payload.input, voice_id=payload.voice or None, response_format="wav"),
+        background,
+    )
+    audio_path = voice_store.resolve_local_uri(speech.output_uri or "")
+    if audio_path is None or not audio_path.exists():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Speech output was not produced.")
+    return Response(content=audio_path.read_bytes(), media_type="audio/wav", headers={"X-Job-Id": speech.id})
 
 
 @app.post("/v1/audio/transcriptions")
-def openai_transcriptions() -> dict[str, str]:
-    return {"text": "Simulated local transcription from the active ASR engine."}
+def openai_transcriptions(file: UploadFile = File(...)) -> dict[str, str]:
+    """OpenAI-compatible transcription using the local faster-whisper engine."""
+    import tempfile
+    from pathlib import Path as _Path
+
+    from app.shorts_media import ShortsMediaError, extract_audio, probe_media
+    from app.shorts_pipeline import ShortsPipelineError
+    from app.shorts_pipeline import transcribe_audio as _transcribe
+
+    suffix = _Path(file.filename or "audio.wav").suffix or ".wav"
+    with tempfile.TemporaryDirectory() as tmp:
+        source = _Path(tmp) / f"input{suffix}"
+        source.write_bytes(file.file.read())
+        try:
+            probe = probe_media(source)
+            audio = extract_audio(source, _Path(tmp)) if probe.has_video else source
+            transcript = _transcribe(audio, provider="local")
+        except (ShortsMediaError, ShortsPipelineError) as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
+    return {"text": transcript.full_text}
